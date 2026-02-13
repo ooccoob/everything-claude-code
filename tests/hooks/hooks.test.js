@@ -101,6 +101,123 @@ async function runTests() {
     );
   })) passed++; else failed++;
 
+  // session-start.js edge cases
+  console.log('\nsession-start.js (edge cases):');
+
+  if (await asyncTest('exits 0 even with isolated empty HOME', async () => {
+    const isoHome = path.join(os.tmpdir(), `ecc-iso-start-${Date.now()}`);
+    fs.mkdirSync(path.join(isoHome, '.claude', 'sessions'), { recursive: true });
+    fs.mkdirSync(path.join(isoHome, '.claude', 'skills', 'learned'), { recursive: true });
+    try {
+      const result = await runScript(path.join(scriptsDir, 'session-start.js'), '', {
+        HOME: isoHome, USERPROFILE: isoHome
+      });
+      assert.strictEqual(result.code, 0, `Exit code should be 0, got ${result.code}`);
+    } finally {
+      fs.rmSync(isoHome, { recursive: true, force: true });
+    }
+  })) passed++; else failed++;
+
+  if (await asyncTest('reports package manager detection', async () => {
+    const result = await runScript(path.join(scriptsDir, 'session-start.js'));
+    assert.ok(
+      result.stderr.includes('Package manager') || result.stderr.includes('[SessionStart]'),
+      'Should report package manager info'
+    );
+  })) passed++; else failed++;
+
+  if (await asyncTest('skips template session content', async () => {
+    const isoHome = path.join(os.tmpdir(), `ecc-tpl-start-${Date.now()}`);
+    const sessionsDir = path.join(isoHome, '.claude', 'sessions');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.mkdirSync(path.join(isoHome, '.claude', 'skills', 'learned'), { recursive: true });
+
+    // Create a session file with template placeholder
+    const sessionFile = path.join(sessionsDir, '2026-02-11-abcd1234-session.tmp');
+    fs.writeFileSync(sessionFile, '## Current State\n\n[Session context goes here]\n');
+
+    try {
+      const result = await runScript(path.join(scriptsDir, 'session-start.js'), '', {
+        HOME: isoHome, USERPROFILE: isoHome
+      });
+      assert.strictEqual(result.code, 0);
+      // stdout should NOT contain the template content
+      assert.ok(
+        !result.stdout.includes('Previous session summary'),
+        'Should not inject template session content'
+      );
+    } finally {
+      fs.rmSync(isoHome, { recursive: true, force: true });
+    }
+  })) passed++; else failed++;
+
+  if (await asyncTest('injects real session content', async () => {
+    const isoHome = path.join(os.tmpdir(), `ecc-real-start-${Date.now()}`);
+    const sessionsDir = path.join(isoHome, '.claude', 'sessions');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.mkdirSync(path.join(isoHome, '.claude', 'skills', 'learned'), { recursive: true });
+
+    // Create a real session file
+    const sessionFile = path.join(sessionsDir, '2026-02-11-efgh5678-session.tmp');
+    fs.writeFileSync(sessionFile, '# Real Session\n\nI worked on authentication refactor.\n');
+
+    try {
+      const result = await runScript(path.join(scriptsDir, 'session-start.js'), '', {
+        HOME: isoHome, USERPROFILE: isoHome
+      });
+      assert.strictEqual(result.code, 0);
+      assert.ok(
+        result.stdout.includes('Previous session summary'),
+        'Should inject real session content'
+      );
+      assert.ok(
+        result.stdout.includes('authentication refactor'),
+        'Should include session content text'
+      );
+    } finally {
+      fs.rmSync(isoHome, { recursive: true, force: true });
+    }
+  })) passed++; else failed++;
+
+  if (await asyncTest('reports learned skills count', async () => {
+    const isoHome = path.join(os.tmpdir(), `ecc-skills-start-${Date.now()}`);
+    const learnedDir = path.join(isoHome, '.claude', 'skills', 'learned');
+    fs.mkdirSync(learnedDir, { recursive: true });
+    fs.mkdirSync(path.join(isoHome, '.claude', 'sessions'), { recursive: true });
+
+    // Create learned skill files
+    fs.writeFileSync(path.join(learnedDir, 'testing-patterns.md'), '# Testing');
+    fs.writeFileSync(path.join(learnedDir, 'debugging.md'), '# Debugging');
+
+    try {
+      const result = await runScript(path.join(scriptsDir, 'session-start.js'), '', {
+        HOME: isoHome, USERPROFILE: isoHome
+      });
+      assert.strictEqual(result.code, 0);
+      assert.ok(
+        result.stderr.includes('2 learned skill(s)'),
+        `Should report 2 learned skills, stderr: ${result.stderr}`
+      );
+    } finally {
+      fs.rmSync(isoHome, { recursive: true, force: true });
+    }
+  })) passed++; else failed++;
+
+  // check-console-log.js tests
+  console.log('\ncheck-console-log.js:');
+
+  if (await asyncTest('passes through stdin data to stdout', async () => {
+    const stdinData = JSON.stringify({ tool_name: 'Write', tool_input: {} });
+    const result = await runScript(path.join(scriptsDir, 'check-console-log.js'), stdinData);
+    assert.strictEqual(result.code, 0);
+    assert.ok(result.stdout.includes('tool_name'), 'Should pass through stdin data');
+  })) passed++; else failed++;
+
+  if (await asyncTest('exits 0 with empty stdin', async () => {
+    const result = await runScript(path.join(scriptsDir, 'check-console-log.js'), '');
+    assert.strictEqual(result.code, 0);
+  })) passed++; else failed++;
+
   // session-end.js tests
   console.log('\nsession-end.js:');
 
@@ -216,6 +333,96 @@ async function runTests() {
     fs.unlinkSync(counterFile);
   })) passed++; else failed++;
 
+  if (await asyncTest('does not suggest below threshold', async () => {
+    const sessionId = 'test-below-' + Date.now();
+    const counterFile = path.join(os.tmpdir(), `claude-tool-count-${sessionId}`);
+
+    fs.writeFileSync(counterFile, '10');
+
+    const result = await runScript(path.join(scriptsDir, 'suggest-compact.js'), '', {
+      CLAUDE_SESSION_ID: sessionId,
+      COMPACT_THRESHOLD: '50'
+    });
+
+    assert.ok(
+      !result.stderr.includes('tool calls'),
+      'Should not suggest compact below threshold'
+    );
+
+    fs.unlinkSync(counterFile);
+  })) passed++; else failed++;
+
+  if (await asyncTest('suggests at regular intervals after threshold', async () => {
+    const sessionId = 'test-interval-' + Date.now();
+    const counterFile = path.join(os.tmpdir(), `claude-tool-count-${sessionId}`);
+
+    // Set counter to 74 (next will be 75, which is >50 and 75%25==0)
+    fs.writeFileSync(counterFile, '74');
+
+    const result = await runScript(path.join(scriptsDir, 'suggest-compact.js'), '', {
+      CLAUDE_SESSION_ID: sessionId,
+      COMPACT_THRESHOLD: '50'
+    });
+
+    assert.ok(
+      result.stderr.includes('75 tool calls'),
+      'Should suggest at 25-call intervals after threshold'
+    );
+
+    fs.unlinkSync(counterFile);
+  })) passed++; else failed++;
+
+  if (await asyncTest('handles corrupted counter file', async () => {
+    const sessionId = 'test-corrupt-' + Date.now();
+    const counterFile = path.join(os.tmpdir(), `claude-tool-count-${sessionId}`);
+
+    fs.writeFileSync(counterFile, 'not-a-number');
+
+    const result = await runScript(path.join(scriptsDir, 'suggest-compact.js'), '', {
+      CLAUDE_SESSION_ID: sessionId
+    });
+
+    assert.strictEqual(result.code, 0, 'Should handle corrupted counter gracefully');
+
+    // Counter should be reset to 1
+    const newCount = parseInt(fs.readFileSync(counterFile, 'utf8').trim(), 10);
+    assert.strictEqual(newCount, 1, 'Should reset counter to 1 on corrupt data');
+
+    fs.unlinkSync(counterFile);
+  })) passed++; else failed++;
+
+  if (await asyncTest('uses default session ID when no env var', async () => {
+    const result = await runScript(path.join(scriptsDir, 'suggest-compact.js'), '', {
+      CLAUDE_SESSION_ID: '' // Empty, should use 'default'
+    });
+
+    assert.strictEqual(result.code, 0, 'Should work with default session ID');
+
+    // Cleanup the default counter file
+    const counterFile = path.join(os.tmpdir(), 'claude-tool-count-default');
+    if (fs.existsSync(counterFile)) fs.unlinkSync(counterFile);
+  })) passed++; else failed++;
+
+  if (await asyncTest('validates threshold bounds', async () => {
+    const sessionId = 'test-bounds-' + Date.now();
+    const counterFile = path.join(os.tmpdir(), `claude-tool-count-${sessionId}`);
+
+    // Invalid threshold should fall back to 50
+    fs.writeFileSync(counterFile, '49');
+
+    const result = await runScript(path.join(scriptsDir, 'suggest-compact.js'), '', {
+      CLAUDE_SESSION_ID: sessionId,
+      COMPACT_THRESHOLD: '-5' // Invalid: negative
+    });
+
+    assert.ok(
+      result.stderr.includes('50 tool calls'),
+      'Should use default threshold (50) for invalid value'
+    );
+
+    fs.unlinkSync(counterFile);
+  })) passed++; else failed++;
+
   // evaluate-session.js tests
   console.log('\nevaluate-session.js:');
 
@@ -232,9 +439,8 @@ async function runTests() {
     const transcript = Array(5).fill('{"type":"user","content":"test"}\n').join('');
     fs.writeFileSync(transcriptPath, transcript);
 
-    const result = await runScript(path.join(scriptsDir, 'evaluate-session.js'), '', {
-      CLAUDE_TRANSCRIPT_PATH: transcriptPath
-    });
+    const stdinJson = JSON.stringify({ transcript_path: transcriptPath });
+    const result = await runScript(path.join(scriptsDir, 'evaluate-session.js'), stdinJson);
 
     assert.ok(
       result.stderr.includes('Session too short'),
@@ -252,15 +458,359 @@ async function runTests() {
     const transcript = Array(15).fill('{"type":"user","content":"test"}\n').join('');
     fs.writeFileSync(transcriptPath, transcript);
 
-    const result = await runScript(path.join(scriptsDir, 'evaluate-session.js'), '', {
-      CLAUDE_TRANSCRIPT_PATH: transcriptPath
-    });
+    const stdinJson = JSON.stringify({ transcript_path: transcriptPath });
+    const result = await runScript(path.join(scriptsDir, 'evaluate-session.js'), stdinJson);
 
     assert.ok(
       result.stderr.includes('15 messages'),
       'Should report message count'
     );
 
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  // evaluate-session.js: whitespace tolerance regression test
+  if (await asyncTest('counts user messages with whitespace in JSON (regression)', async () => {
+    const testDir = createTestDir();
+    const transcriptPath = path.join(testDir, 'transcript.jsonl');
+
+    // Create transcript with whitespace around colons (pretty-printed style)
+    const lines = [];
+    for (let i = 0; i < 15; i++) {
+      lines.push('{ "type" : "user", "content": "message ' + i + '" }');
+    }
+    fs.writeFileSync(transcriptPath, lines.join('\n'));
+
+    const stdinJson = JSON.stringify({ transcript_path: transcriptPath });
+    const result = await runScript(path.join(scriptsDir, 'evaluate-session.js'), stdinJson);
+
+    assert.ok(
+      result.stderr.includes('15 messages'),
+      'Should count user messages with whitespace in JSON, got: ' + result.stderr.trim()
+    );
+
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  // session-end.js: content array with null elements regression test
+  if (await asyncTest('handles transcript with null content array elements (regression)', async () => {
+    const testDir = createTestDir();
+    const transcriptPath = path.join(testDir, 'transcript.jsonl');
+
+    // Create transcript with null elements in content array
+    const lines = [
+      '{"type":"user","content":[null,{"text":"hello"},null,{"text":"world"}]}',
+      '{"type":"user","content":"simple string message"}',
+      '{"type":"user","content":[{"text":"normal"},{"text":"array"}]}',
+      '{"type":"tool_use","tool_name":"Edit","tool_input":{"file_path":"/test.js"}}',
+    ];
+    fs.writeFileSync(transcriptPath, lines.join('\n'));
+
+    const stdinJson = JSON.stringify({ transcript_path: transcriptPath });
+    const result = await runScript(path.join(scriptsDir, 'session-end.js'), stdinJson);
+
+    // Should not crash (exit 0)
+    assert.strictEqual(result.code, 0, 'Should handle null content elements without crash');
+  })) passed++; else failed++;
+
+  // post-edit-console-warn.js tests
+  console.log('\npost-edit-console-warn.js:');
+
+  if (await asyncTest('warns about console.log in JS files', async () => {
+    const testDir = createTestDir();
+    const testFile = path.join(testDir, 'test.js');
+    fs.writeFileSync(testFile, 'const x = 1;\nconsole.log(x);\nreturn x;');
+
+    const stdinJson = JSON.stringify({ tool_input: { file_path: testFile } });
+    const result = await runScript(path.join(scriptsDir, 'post-edit-console-warn.js'), stdinJson);
+
+    assert.ok(result.stderr.includes('console.log'), 'Should warn about console.log');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (await asyncTest('does not warn for non-JS files', async () => {
+    const testDir = createTestDir();
+    const testFile = path.join(testDir, 'test.md');
+    fs.writeFileSync(testFile, 'Use console.log for debugging');
+
+    const stdinJson = JSON.stringify({ tool_input: { file_path: testFile } });
+    const result = await runScript(path.join(scriptsDir, 'post-edit-console-warn.js'), stdinJson);
+
+    assert.ok(!result.stderr.includes('console.log'), 'Should not warn for non-JS files');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (await asyncTest('does not warn for clean JS files', async () => {
+    const testDir = createTestDir();
+    const testFile = path.join(testDir, 'clean.ts');
+    fs.writeFileSync(testFile, 'const x = 1;\nreturn x;');
+
+    const stdinJson = JSON.stringify({ tool_input: { file_path: testFile } });
+    const result = await runScript(path.join(scriptsDir, 'post-edit-console-warn.js'), stdinJson);
+
+    assert.ok(!result.stderr.includes('WARNING'), 'Should not warn for clean files');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (await asyncTest('handles missing file gracefully', async () => {
+    const stdinJson = JSON.stringify({ tool_input: { file_path: '/nonexistent/file.ts' } });
+    const result = await runScript(path.join(scriptsDir, 'post-edit-console-warn.js'), stdinJson);
+
+    assert.strictEqual(result.code, 0, 'Should not crash on missing file');
+  })) passed++; else failed++;
+
+  if (await asyncTest('passes through original data on stdout', async () => {
+    const stdinJson = JSON.stringify({ tool_input: { file_path: '/test.py' } });
+    const result = await runScript(path.join(scriptsDir, 'post-edit-console-warn.js'), stdinJson);
+
+    assert.ok(result.stdout.includes('tool_input'), 'Should pass through stdin data');
+  })) passed++; else failed++;
+
+  // post-edit-format.js tests
+  console.log('\npost-edit-format.js:');
+
+  if (await asyncTest('runs without error on empty stdin', async () => {
+    const result = await runScript(path.join(scriptsDir, 'post-edit-format.js'));
+    assert.strictEqual(result.code, 0, 'Should exit 0 on empty stdin');
+  })) passed++; else failed++;
+
+  if (await asyncTest('skips non-JS/TS files', async () => {
+    const stdinJson = JSON.stringify({ tool_input: { file_path: '/test.py' } });
+    const result = await runScript(path.join(scriptsDir, 'post-edit-format.js'), stdinJson);
+    assert.strictEqual(result.code, 0, 'Should exit 0 for non-JS files');
+    assert.ok(result.stdout.includes('tool_input'), 'Should pass through stdin data');
+  })) passed++; else failed++;
+
+  if (await asyncTest('passes through data for invalid JSON', async () => {
+    const result = await runScript(path.join(scriptsDir, 'post-edit-format.js'), 'not json');
+    assert.strictEqual(result.code, 0, 'Should exit 0 for invalid JSON');
+  })) passed++; else failed++;
+
+  // post-edit-typecheck.js tests
+  console.log('\npost-edit-typecheck.js:');
+
+  if (await asyncTest('runs without error on empty stdin', async () => {
+    const result = await runScript(path.join(scriptsDir, 'post-edit-typecheck.js'));
+    assert.strictEqual(result.code, 0, 'Should exit 0 on empty stdin');
+  })) passed++; else failed++;
+
+  if (await asyncTest('skips non-TypeScript files', async () => {
+    const stdinJson = JSON.stringify({ tool_input: { file_path: '/test.js' } });
+    const result = await runScript(path.join(scriptsDir, 'post-edit-typecheck.js'), stdinJson);
+    assert.strictEqual(result.code, 0, 'Should exit 0 for non-TS files');
+    assert.ok(result.stdout.includes('tool_input'), 'Should pass through stdin data');
+  })) passed++; else failed++;
+
+  if (await asyncTest('handles nonexistent TS file gracefully', async () => {
+    const stdinJson = JSON.stringify({ tool_input: { file_path: '/nonexistent/file.ts' } });
+    const result = await runScript(path.join(scriptsDir, 'post-edit-typecheck.js'), stdinJson);
+    assert.strictEqual(result.code, 0, 'Should exit 0 for missing file');
+  })) passed++; else failed++;
+
+  if (await asyncTest('handles TS file with no tsconfig gracefully', async () => {
+    const testDir = createTestDir();
+    const testFile = path.join(testDir, 'test.ts');
+    fs.writeFileSync(testFile, 'const x: number = 1;');
+
+    const stdinJson = JSON.stringify({ tool_input: { file_path: testFile } });
+    const result = await runScript(path.join(scriptsDir, 'post-edit-typecheck.js'), stdinJson);
+    assert.strictEqual(result.code, 0, 'Should exit 0 when no tsconfig found');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  // session-end.js extractSessionSummary tests
+  console.log('\nsession-end.js (extractSessionSummary):');
+
+  if (await asyncTest('extracts user messages from transcript', async () => {
+    const testDir = createTestDir();
+    const transcriptPath = path.join(testDir, 'transcript.jsonl');
+
+    const lines = [
+      '{"type":"user","content":"Fix the login bug"}',
+      '{"type":"assistant","content":"I will fix it"}',
+      '{"type":"user","content":"Also add tests"}',
+    ];
+    fs.writeFileSync(transcriptPath, lines.join('\n'));
+
+    const stdinJson = JSON.stringify({ transcript_path: transcriptPath });
+    const result = await runScript(path.join(scriptsDir, 'session-end.js'), stdinJson);
+    assert.strictEqual(result.code, 0);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (await asyncTest('handles transcript with array content fields', async () => {
+    const testDir = createTestDir();
+    const transcriptPath = path.join(testDir, 'transcript.jsonl');
+
+    const lines = [
+      '{"type":"user","content":[{"text":"Part 1"},{"text":"Part 2"}]}',
+      '{"type":"user","content":"Simple message"}',
+    ];
+    fs.writeFileSync(transcriptPath, lines.join('\n'));
+
+    const stdinJson = JSON.stringify({ transcript_path: transcriptPath });
+    const result = await runScript(path.join(scriptsDir, 'session-end.js'), stdinJson);
+    assert.strictEqual(result.code, 0, 'Should handle array content without crash');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (await asyncTest('extracts tool names and file paths from transcript', async () => {
+    const testDir = createTestDir();
+    const transcriptPath = path.join(testDir, 'transcript.jsonl');
+
+    const lines = [
+      '{"type":"user","content":"Edit the file"}',
+      '{"type":"tool_use","tool_name":"Edit","tool_input":{"file_path":"/src/main.ts"}}',
+      '{"type":"tool_use","tool_name":"Read","tool_input":{"file_path":"/src/utils.ts"}}',
+      '{"type":"tool_use","tool_name":"Write","tool_input":{"file_path":"/src/new.ts"}}',
+    ];
+    fs.writeFileSync(transcriptPath, lines.join('\n'));
+
+    const stdinJson = JSON.stringify({ transcript_path: transcriptPath });
+    const result = await runScript(path.join(scriptsDir, 'session-end.js'), stdinJson);
+    assert.strictEqual(result.code, 0);
+    // Session file should contain summary with tools used
+    assert.ok(
+      result.stderr.includes('Created session file') || result.stderr.includes('Updated session file'),
+      'Should create/update session file'
+    );
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (await asyncTest('handles transcript with malformed JSON lines', async () => {
+    const testDir = createTestDir();
+    const transcriptPath = path.join(testDir, 'transcript.jsonl');
+
+    const lines = [
+      '{"type":"user","content":"Valid message"}',
+      'NOT VALID JSON',
+      '{"broken json',
+      '{"type":"user","content":"Another valid"}',
+    ];
+    fs.writeFileSync(transcriptPath, lines.join('\n'));
+
+    const stdinJson = JSON.stringify({ transcript_path: transcriptPath });
+    const result = await runScript(path.join(scriptsDir, 'session-end.js'), stdinJson);
+    assert.strictEqual(result.code, 0, 'Should skip malformed lines gracefully');
+    assert.ok(
+      result.stderr.includes('unparseable') || result.stderr.includes('Skipped'),
+      `Should report parse errors, got: ${result.stderr.substring(0, 200)}`
+    );
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (await asyncTest('handles empty transcript (no user messages)', async () => {
+    const testDir = createTestDir();
+    const transcriptPath = path.join(testDir, 'transcript.jsonl');
+
+    // Only tool_use entries, no user messages
+    const lines = [
+      '{"type":"tool_use","tool_name":"Read","tool_input":{}}',
+      '{"type":"assistant","content":"done"}',
+    ];
+    fs.writeFileSync(transcriptPath, lines.join('\n'));
+
+    const stdinJson = JSON.stringify({ transcript_path: transcriptPath });
+    const result = await runScript(path.join(scriptsDir, 'session-end.js'), stdinJson);
+    assert.strictEqual(result.code, 0, 'Should handle transcript with no user messages');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (await asyncTest('truncates long user messages to 200 chars', async () => {
+    const testDir = createTestDir();
+    const transcriptPath = path.join(testDir, 'transcript.jsonl');
+
+    const longMsg = 'x'.repeat(500);
+    const lines = [
+      `{"type":"user","content":"${longMsg}"}`,
+    ];
+    fs.writeFileSync(transcriptPath, lines.join('\n'));
+
+    const stdinJson = JSON.stringify({ transcript_path: transcriptPath });
+    const result = await runScript(path.join(scriptsDir, 'session-end.js'), stdinJson);
+    assert.strictEqual(result.code, 0, 'Should handle and truncate long messages');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (await asyncTest('uses CLAUDE_TRANSCRIPT_PATH env var as fallback', async () => {
+    const testDir = createTestDir();
+    const transcriptPath = path.join(testDir, 'transcript.jsonl');
+
+    const lines = [
+      '{"type":"user","content":"Fallback test message"}',
+    ];
+    fs.writeFileSync(transcriptPath, lines.join('\n'));
+
+    // Send invalid JSON to stdin so it falls back to env var
+    const result = await runScript(path.join(scriptsDir, 'session-end.js'), 'not json', {
+      CLAUDE_TRANSCRIPT_PATH: transcriptPath
+    });
+    assert.strictEqual(result.code, 0, 'Should use env var fallback');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (await asyncTest('escapes backticks in user messages in session file', async () => {
+    const testDir = createTestDir();
+    const transcriptPath = path.join(testDir, 'transcript.jsonl');
+
+    // User messages with backticks that could break markdown
+    const lines = [
+      '{"type":"user","content":"Fix the `handleAuth` function in `auth.ts`"}',
+      '{"type":"user","content":"Run `npm test` to verify"}',
+    ];
+    fs.writeFileSync(transcriptPath, lines.join('\n'));
+
+    const stdinJson = JSON.stringify({ transcript_path: transcriptPath });
+    const result = await runScript(path.join(scriptsDir, 'session-end.js'), stdinJson, {
+      HOME: testDir
+    });
+    assert.strictEqual(result.code, 0, 'Should handle backticks without crash');
+
+    // Find the session file in the temp HOME
+    const claudeDir = path.join(testDir, '.claude', 'sessions');
+    if (fs.existsSync(claudeDir)) {
+      const files = fs.readdirSync(claudeDir).filter(f => f.endsWith('.tmp'));
+      if (files.length > 0) {
+        const content = fs.readFileSync(path.join(claudeDir, files[0]), 'utf8');
+        // Backticks should be escaped in the output
+        assert.ok(content.includes('\\`'), 'Should escape backticks in session file');
+        assert.ok(!content.includes('`handleAuth`'), 'Raw backticks should be escaped');
+      }
+    }
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (await asyncTest('session file contains tools used and files modified', async () => {
+    const testDir = createTestDir();
+    const transcriptPath = path.join(testDir, 'transcript.jsonl');
+
+    const lines = [
+      '{"type":"user","content":"Edit the config"}',
+      '{"type":"tool_use","tool_name":"Edit","tool_input":{"file_path":"/src/config.ts"}}',
+      '{"type":"tool_use","tool_name":"Read","tool_input":{"file_path":"/src/utils.ts"}}',
+      '{"type":"tool_use","tool_name":"Write","tool_input":{"file_path":"/src/new-file.ts"}}',
+    ];
+    fs.writeFileSync(transcriptPath, lines.join('\n'));
+
+    const stdinJson = JSON.stringify({ transcript_path: transcriptPath });
+    const result = await runScript(path.join(scriptsDir, 'session-end.js'), stdinJson, {
+      HOME: testDir
+    });
+    assert.strictEqual(result.code, 0);
+
+    const claudeDir = path.join(testDir, '.claude', 'sessions');
+    if (fs.existsSync(claudeDir)) {
+      const files = fs.readdirSync(claudeDir).filter(f => f.endsWith('.tmp'));
+      if (files.length > 0) {
+        const content = fs.readFileSync(path.join(claudeDir, files[0]), 'utf8');
+        // Should contain files modified (Edit and Write, not Read)
+        assert.ok(content.includes('/src/config.ts'), 'Should list edited file');
+        assert.ok(content.includes('/src/new-file.ts'), 'Should list written file');
+        // Should contain tools used
+        assert.ok(content.includes('Edit'), 'Should list Edit tool');
+        assert.ok(content.includes('Read'), 'Should list Read tool');
+      }
+    }
     cleanupTestDir(testDir);
   })) passed++; else failed++;
 
@@ -280,6 +830,7 @@ async function runTests() {
     assert.ok(hooks.hooks.PreToolUse, 'Should have PreToolUse hooks');
     assert.ok(hooks.hooks.PostToolUse, 'Should have PostToolUse hooks');
     assert.ok(hooks.hooks.SessionStart, 'Should have SessionStart hooks');
+    assert.ok(hooks.hooks.SessionEnd, 'Should have SessionEnd hooks');
     assert.ok(hooks.hooks.Stop, 'Should have Stop hooks');
     assert.ok(hooks.hooks.PreCompact, 'Should have PreCompact hooks');
   })) passed++; else failed++;

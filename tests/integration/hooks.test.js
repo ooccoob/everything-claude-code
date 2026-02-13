@@ -58,9 +58,10 @@ function runHookWithInput(scriptPath, input = {}, env = {}, timeoutMs = 10000) {
     proc.stdout.on('data', data => stdout += data);
     proc.stderr.on('data', data => stderr += data);
 
-    // Ignore EPIPE errors (process may exit before we finish writing)
+    // Ignore EPIPE/EOF errors (process may exit before we finish writing)
+    // Windows uses EOF instead of EPIPE for closed pipe writes
     proc.stdin.on('error', (err) => {
-      if (err.code !== 'EPIPE') {
+      if (err.code !== 'EPIPE' && err.code !== 'EOF') {
         reject(err);
       }
     });
@@ -236,7 +237,7 @@ async function runTests() {
   })) passed++; else failed++;
 
   if (await asyncTest('blocking hooks output BLOCKED message', async () => {
-    // Test the dev server blocking hook
+    // Test the dev server blocking hook — must send a matching command
     const blockingCommand = hooks.hooks.PreToolUse[0].hooks[0].command;
     const match = blockingCommand.match(/^node -e "(.+)"$/s);
 
@@ -248,6 +249,10 @@ async function runTests() {
     let code = null;
     proc.stderr.on('data', data => stderr += data);
 
+    // Send a dev server command so the hook triggers the block
+    proc.stdin.write(JSON.stringify({
+      tool_input: { command: 'npm run dev' }
+    }));
     proc.stdin.end();
 
     await new Promise(resolve => {
@@ -258,7 +263,7 @@ async function runTests() {
     });
 
     assert.ok(stderr.includes('BLOCKED'), 'Blocking hook should output BLOCKED');
-    assert.strictEqual(code, 1, 'Blocking hook should exit with code 1');
+    assert.strictEqual(code, 2, 'Blocking hook should exit with code 2');
   })) passed++; else failed++;
 
   // ==========================================
@@ -271,8 +276,8 @@ async function runTests() {
     assert.strictEqual(result.code, 0, 'Non-blocking hook should exit 0');
   })) passed++; else failed++;
 
-  if (await asyncTest('blocking hooks exit with code 1', async () => {
-    // The dev server blocker always blocks
+  if (await asyncTest('blocking hooks exit with code 2', async () => {
+    // The dev server blocker blocks when a dev server command is detected
     const blockingCommand = hooks.hooks.PreToolUse[0].hooks[0].command;
     const match = blockingCommand.match(/^node -e "(.+)"$/s);
 
@@ -281,6 +286,9 @@ async function runTests() {
     });
 
     let code = null;
+    proc.stdin.write(JSON.stringify({
+      tool_input: { command: 'yarn dev' }
+    }));
     proc.stdin.end();
 
     await new Promise(resolve => {
@@ -290,7 +298,7 @@ async function runTests() {
       });
     });
 
-    assert.strictEqual(code, 1, 'Blocking hook should exit 1');
+    assert.strictEqual(code, 2, 'Blocking hook should exit 2');
   })) passed++; else failed++;
 
   if (await asyncTest('hooks handle missing files gracefully', async () => {
@@ -300,8 +308,7 @@ async function runTests() {
     try {
       const result = await runHookWithInput(
         path.join(scriptsDir, 'evaluate-session.js'),
-        {},
-        { CLAUDE_TRANSCRIPT_PATH: transcriptPath }
+        { transcript_path: transcriptPath }
       );
 
       // Should not crash, just skip processing
@@ -357,8 +364,7 @@ async function runTests() {
     try {
       const result = await runHookWithInput(
         path.join(scriptsDir, 'evaluate-session.js'),
-        {},
-        { CLAUDE_TRANSCRIPT_PATH: transcriptPath }
+        { transcript_path: transcriptPath }
       );
 
       assert.ok(result.stderr.includes('15 messages'), 'Should process session');
@@ -437,6 +443,64 @@ async function runTests() {
 
     assert.strictEqual(result.code, 0, 'Should complete successfully');
     assert.ok(elapsed < 5000, `Should complete in <5s, took ${elapsed}ms`);
+  })) passed++; else failed++;
+
+  if (await asyncTest('hooks survive stdin exceeding 1MB limit', async () => {
+    // The post-edit-console-warn hook reads stdin up to 1MB then passes through
+    // Send > 1MB to verify truncation doesn't crash the hook
+    const oversizedInput = JSON.stringify({
+      tool_input: { file_path: '/test.js' },
+      tool_output: { output: 'x'.repeat(1200000) } // ~1.2MB
+    });
+
+    const proc = spawn('node', [path.join(scriptsDir, 'post-edit-console-warn.js')], {
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    let code = null;
+    // MUST drain stdout/stderr to prevent backpressure blocking the child process
+    proc.stdout.on('data', () => {});
+    proc.stderr.on('data', () => {});
+    proc.stdin.on('error', (err) => {
+      if (err.code !== 'EPIPE' && err.code !== 'EOF') throw err;
+    });
+    proc.stdin.write(oversizedInput);
+    proc.stdin.end();
+
+    await new Promise(resolve => {
+      proc.on('close', (c) => { code = c; resolve(); });
+    });
+
+    assert.strictEqual(code, 0, 'Should exit 0 despite oversized input');
+  })) passed++; else failed++;
+
+  if (await asyncTest('hooks handle truncated JSON from overflow gracefully', async () => {
+    // session-end parses stdin JSON. If input is > 1MB and truncated mid-JSON,
+    // JSON.parse should fail and fall back to env var
+    const proc = spawn('node', [path.join(scriptsDir, 'session-end.js')], {
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    let code = null;
+    let stderr = '';
+    // MUST drain stdout to prevent backpressure blocking the child process
+    proc.stdout.on('data', () => {});
+    proc.stderr.on('data', data => stderr += data);
+    proc.stdin.on('error', (err) => {
+      if (err.code !== 'EPIPE' && err.code !== 'EOF') throw err;
+    });
+
+    // Build a string that will be truncated mid-JSON at 1MB
+    const bigValue = 'x'.repeat(1200000);
+    proc.stdin.write(`{"transcript_path":"/tmp/none","padding":"${bigValue}"}`);
+    proc.stdin.end();
+
+    await new Promise(resolve => {
+      proc.on('close', (c) => { code = c; resolve(); });
+    });
+
+    // Should exit 0 even if JSON parse fails (falls back to env var or null)
+    assert.strictEqual(code, 0, 'Should not crash on truncated JSON');
   })) passed++; else failed++;
 
   // Summary
